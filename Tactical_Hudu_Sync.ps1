@@ -26,9 +26,10 @@
     - add optional Hudu Relations to the built in Office 365 integration (e.g. last_logged_in_user so you can match a logged in user with their respective workstations)
     - add more tactical fields
     - reduce the amount of rest calls made
-		
+        
 .VERSION
     - v1.0 Initial Release by https://github.com/bc24fl/tacticalrmm-scripts/
+    - v1.1 Fixed and added a ton, by Bomb.
 #>
 
 param(
@@ -39,6 +40,7 @@ param(
     [string] $HuduAssetName,
     [switch] $CopyMode
 )
+
 function Get-ArrayData {
     param(
         $data
@@ -49,6 +51,7 @@ function Get-ArrayData {
     }
     return $formattedData
 }
+
 function Get-CustomFieldData {
     param(
         $label,
@@ -61,6 +64,56 @@ function Get-CustomFieldData {
         }
     }
     return $value
+}
+
+function Get-TacticalCustomFieldData {
+    param(
+        $field_id,
+        $arrayData
+    )
+    $value = ""
+    foreach ($f in $arrayData) {
+        if ($f.field -eq $field_id){
+            $value = $f.value
+        }
+    }
+    return $value
+}
+
+function Get-TacticalCustomFieldAgentIDNumber {
+    param(
+        $field_id,
+        $arrayData
+    )
+    $value = ""
+    foreach ($f in $arrayData) {
+        $value = $f.agent
+    }
+    return $value
+}
+
+function Get-TacticalSites {
+    param(
+        [string] $ApiUrlTactical,
+        [hashtable] $Headers
+    )
+    try {
+        $sitesResult = Invoke-RestMethod -Method 'Get' -Uri "https://$ApiUrlTactical/clients/sites" -Headers $Headers -ContentType "application/json"
+        return $sitesResult
+    }
+    catch {
+        throw "Error invoking rest call on Tactical RMM for sites with error: $($PSItem.ToString())"
+    }
+}
+
+function SiteIdInList {
+    param(
+        $site,
+        $id
+    )
+    $siteIds = Get-CustomFieldData -label "RMM Site ID(s)" -arrayData $site.fields
+    $idList = $siteIds -split ",\s*"
+    return $idList -contains $id
 }
 
 if ([string]::IsNullOrEmpty($ApiKeyTactical)) {
@@ -80,7 +133,7 @@ if ([string]::IsNullOrEmpty($ApiUrlHudu)) {
 }
 
 if ([string]::IsNullOrEmpty($HuduAssetName)) {
-    Write-Output "HuduAssetName param not defined.  Using default name TacticalRMM Agents."
+    Write-Host "HuduAssetName param not defined.  Using default name TacticalRMM Agents."
     $HuduAssetName = "TacticalRMM Agents"
 }
 
@@ -103,140 +156,229 @@ $headers= @{
 New-HuduAPIKey $ApiKeyHudu 
 New-HuduBaseURL "https://$ApiUrlHudu" 
 
+$huduSiteName = "Sites"
+
+# Sites
+$huduSiteLayout = Get-HuduAssetLayouts -name $huduSiteName
+
+if (!$huduSiteLayout){
+    Write-Host "WARNING: Hudu Site layout wasn't found. Creating one now." -ForegroundColor Yellow
+    $fields = @(
+    @{
+        label = 'Address'
+        field_type = 'Text'
+        position = 1
+        show_in_list = $true
+    },
+    @{
+        label = 'Office Phone'
+        field_type = 'Phone'
+        position = 2
+        show_in_list = $true
+    },
+    @{
+        label = 'RMM Site ID(s)'
+        field_type = 'Text'
+        position = 3
+        required = $true
+    })
+    New-HuduAssetLayout -name $huduSiteName -icon "fas fa-building" -color "#5B17F2" -icon_color "#ffffff" -include_passwords $false -include_photos $false -include_comments $false -include_files $false -fields $fields
+}
+
+$huduSiteLayout = Get-HuduAssetLayouts -name $huduSiteName
+$huduSites = Get-HuduAssets -assetlayoutid $huduSiteLayout.id
+
+if (!$huduSites) {
+    Write-Host "WARNING: Hudu has no sites in $huduSiteName" -ForegroundColor Yellow
+}
+
+Write-Host "Hudu Site Layout: $($huduSiteLayout.id) - $($huduSiteLayout.name)"
+Write-Host "Hudu Sites: $($huduSites.Count)"
+
+$huduSitesList = @($huduSites)  # Initialize as array to avoid method invocation error
+
+# Fetch Tactical RMM Sites
+$tacticalSites = Get-TacticalSites -ApiUrlTactical $ApiUrlTactical -Headers $headers
+
+# Create a mapping for Tactical site names to RMM Site IDs
+$tacticalSiteMap = @{}
+foreach ($site in $tacticalSites) {
+    $tacticalSiteMap[$site.name] = $site.id
+}
+
+# Create a mapping for Hudu RMM Site IDs
+$huduSiteMap = @{}
+foreach ($site in $huduSitesList) {
+    $siteIds = Get-CustomFieldData -label "RMM Site ID(s)" -arrayData $site.fields
+    $siteIdList = $siteIds -split ",\s*"
+    foreach ($siteId in $siteIdList) {
+        $huduSiteMap[$siteId] = $site
+    }
+}
+
 $huduAssetLayout = Get-HuduAssetLayouts -name $HuduAssetName
 
 # Create Hudu Asset Layout if it does not exist
 if (!$huduAssetLayout){
     $fields = @(
     @{
-        label = 'Client Name'
-        field_type = 'Text'
+        label = 'Site'
+        field_type = 'AssetTag'
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
         position = 1
-    },
-    @{
-        label = 'Site Name'
-        field_type = 'Text'
-        position = 2
         show_in_list = $true
-    },
-    @{
-        label = 'Computer Name'
-        field_type = 'Text'
-        position = 3
+        linkable_id = $huduSiteLayout.id
     },
     @{
         label = 'Status'
         field_type = 'CheckBox'
-        hint = 'Online/Offline'
-        position = 4
+        hint = 'Online/Offline - DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 2
     },
     @{
         label = 'Description'
         field_type = 'Text'
-        position = 5
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 3
     },
     @{
         label = 'Patches Pending'
         field_type = 'CheckBox'
-        hint = ''
-        position = 6
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 4
     },
     @{
         label = 'Last Seen'
-        field_type = 'Text'
-        position = 7
+        field_type = 'Date'
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 5
+        show_in_list = $true
     },
     @{
-        label = 'Logged Username'
+        label = 'Last Logged Username'
         field_type = 'Text'
-        position = 8
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 6
         show_in_list = $true
     },
     @{
         label = 'Needs Reboot'
         field_type = 'CheckBox'
-        hint = ''
-        position = 9
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 7
         show_in_list = $true
     },
     @{
         label = 'Overdue Dashboard Alert'
         field_type = 'CheckBox'
-        hint = ''
-        position = 10
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 8
     },
     @{
         label = 'Overdue Email Alert'
         field_type = 'CheckBox'
-        hint = ''
-        position = 11
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 9
     },
     @{
         label = 'Overdue Text Alert'
         field_type = 'CheckBox'
-        hint = ''
-        position = 12
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 10
     },
     @{
         label = 'Pending Actions Count'
         field_type = 'Number'
-        hint = ''
-        position = 13
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 11
     },
     @{
         label = 'Make Model'
         field_type = 'Text'
-        position = 14
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 12
+        show_in_list = $true
     },
     @{
         label = 'CPU Model'
         field_type = 'RichText'
-        position = 15
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 13
     },
     @{
-        label = 'Total RAM'
+        label = 'Total GB of RAM'
         field_type = 'Number'
-        hint = ''
-        position = 16
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 14
     },
     @{
         label = 'Operating System'
         field_type = 'Text'
-        position = 17
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 15
     },
     @{
         label = 'Local Ips'
         field_type = 'Text'
-        position = 18
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 16
     },
     @{
         label = 'Public Ip'
         field_type = 'Text'
-        position = 19
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 17
     },
     @{
         label = 'Graphics'
         field_type = 'Text'
-        position = 20
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 18
     },
     @{
         label = 'Disks'
         field_type = 'RichText'
-        position = 21
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 19
     },    
     @{
         label = 'Created Time'
         field_type = 'Text'
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 20
+    },
+    @{  # Custom ones
+        label = 'Warranty Expiration'
+        field_type = 'Date'
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 21
+        show_in_list = $true
+        expiration = $true
+    },
+    @{  # Custom ones
+        label = 'Serial Number'
+        field_type = 'Text'
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
         position = 22
+        show_in_list = $true
+    },
+    @{  # Custom ones
+        label = 'Custom Asset Tag'
+        field_type = 'Text'
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 23
+        show_in_list = $true
     },
     @{
         label = 'Agent Id'
         field_type = 'Text'
-        position = 99
+        hint = 'DO NOT EDIT SYNCED ASSETS FROM HUDU. EDIT THEM IN THE RMM SYSTEM.'
+        position = 24
     })
     New-HuduAssetLayout -name $HuduAssetName -icon "fas fa-fire" -color "#5B17F2" -icon_color "#ffffff" -include_passwords $false -include_photos $false -include_comments $false -include_files $false -fields $fields
     Start-Sleep -s 5
     $huduAssetLayout = Get-HuduAssetLayouts -name $HuduAssetName
+    Write-Host "Hudu Asset Layout created: $($huduAssetLayout.id) - $($huduAssetLayout.name)" -ForegroundColor Green
 }
 
 # If not CopyMode set, delete all assets before performing sync
@@ -246,21 +388,71 @@ if (!$CopyMode){
         $assetId        = $asset.id
         $assetName      = $asset.name
         $assetCompanyId = $asset.company_id
-        Write-Host "Deleting $assetName from company id $assetCompanyId with an asset id of $assetId  "
+        Write-Host "Deleting $assetName from company id $assetCompanyId with an asset id of $assetId"
         Remove-HuduAsset -Id $asset.id -CompanyId $asset.company_id
     }
 }
 
 try {
     $agentsResult = Invoke-RestMethod -Method 'Get' -Uri "https://$ApiUrlTactical/agents" -Headers $headers -ContentType "application/json"
+    Write-Host "Agents Result: $(Get-ArrayData -data $agentsResult)"
 }
 catch {
     throw "Error invoking rest call on Tactical RMM with error: $($PSItem.ToString())"
 }
 
-foreach ($agents in $agentsResult) {
+$for_each_index = 0
 
-    $agentId = $agents.agent_id
+foreach ($agent in $agentsResult) {
+    $for_each_index++
+    Write-Host "Processing agent number $for_each_index of $($agentsResult.Count)"
+
+    $agentId = $agent.agent_id
+    $serial_number = $agent.serial_number # Custom added
+
+    $huduCompaniesFiltered = Get-HuduCompanies -name $agent.client_name
+
+    # If Hudu Company matches a Tactical Client
+    if (!$huduCompaniesFiltered){
+        Write-Host "Company does not exist in Hudu: $($agent.client_name)" -ForegroundColor Red
+        continue
+    }
+
+    # Check if site exists in Hudu
+    $siteToLinkArray = @()
+    if ($tacticalSiteMap.ContainsKey($agent.site_name)) {
+        $tacticalSiteId = $tacticalSiteMap[$agent.site_name].ToString()
+        if ($huduSiteMap.ContainsKey($tacticalSiteId)) {
+            $site = $huduSiteMap[$tacticalSiteId]
+            $siteName = $site.name
+            $siteId = $site.id
+            $siteAddress = Get-CustomFieldData -label "Address" -arrayData $site.fields
+            $sitePhone = Get-CustomFieldData -label "Office Phone" -arrayData $site.fields
+            Write-Host "Site: $siteName - $siteId - $siteAddress - $sitePhone"
+            $siteToLink = $site | Select-Object id, url, name
+            $siteToLink.url = $siteToLink.url -replace "https://$ApiUrlHudu", ""
+            $siteToLinkArray += $siteToLink
+        } else {
+            Write-Host "RMM RMM Site ID $tacticalSiteId does not exist in Hudu: $($agent.site_name)" -ForegroundColor Red
+            # Create Site in Hudu
+            New-HuduAsset -name $agent.site_name -company_id $huduCompaniesFiltered.id -assetlayoutid $huduSiteLayout.id -fields @(@{address = ''; office_phone = ''; "RMM Site ID(s)" = $tacticalSiteId})
+            $site = Get-HuduAssets -name $agent.site_name -assetlayoutid $huduSiteLayout.id # Get the site that was just created. New-HuduAsset does not return the asset... 🙄
+            $huduSitesList += @($site)
+            $siteToLink = $site | Select-Object id, url, name
+            $siteToLink.url = $siteToLink.url -replace "https://$ApiUrlHudu", ""
+            $siteToLinkArray += $siteToLink
+            # Update the site map
+            foreach ($newSiteId in ($tacticalSiteId -split ",\s*")) {
+                $huduSiteMap[$newSiteId] = $site
+            }
+            Write-Host "Site created in Hudu: $($agent.site_name)" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "Site name $($agent.site_name) not found in Tactical site map." -ForegroundColor Red
+    }
+
+    $siteToLinkJson = $siteToLinkArray | ConvertTo-Json
+    Write-Host "Site(s) found or created: $($siteToLinkJson)" -ForegroundColor Yellow
 
     try {
         $agentDetailsResult = Invoke-RestMethod -Method 'Get' -Uri "https://$ApiUrlTactical/agents/$agentId" -Headers $headers -ContentType "application/json"
@@ -269,24 +461,28 @@ foreach ($agents in $agentsResult) {
         Write-Error "Error invoking agent detail rest call on Tactical RMM with error: $($PSItem.ToString())"
     }
 
+    #Write-Host "Full details: $agentDetailsResult"
+
     $textDisk   = Get-ArrayData -data $agentDetailsResult.disks
     $textCpu    = Get-ArrayData -data $agentDetailsResult.cpu_model
+    $warrantyExp = Get-TacticalCustomFieldData -field_id 32 -arrayData $agentDetailsResult.custom_fields
+    $CustomAssetTag = Get-TacticalCustomFieldData -field_id 5 -arrayData $agentDetailsResult.custom_fields
+    $agent_id_number = Get-TacticalCustomFieldAgentIDNumber -arrayData $agentDetailsResult.custom_fields # agent has to have been online since the custom field was created. Field 1 (serial number) was added before any/most devices.
 
+    # The name on the left needs to match the label in the Hudu Asset Layout listed above... (caps dont matter, spaces need to be _'s)
     $fieldData = @(
-	@{
-        client_name             = $agents.client_name
-        site_name               = $agents.site_name
-        computer_name           = $agents.hostname
-        status                  = $agents.status
-        description             = $agents.description
-        patches_pending         = $agents.has_patches_pending
-        last_seen               = $agents.last_seen
-        logged_username         = $agentDetailsResult.last_logged_in_user
-        needs_reboot            = $agents.needs_reboot
-        overdue_dashboard_alert = $agents.overdue_dashboard_alert
-        overdue_email_alert     = $agents.overdue_email_alert
-        overdue_text_alert      = $agents.overdue_text_alert
-        pending_actions_count   = $agents.pending_actions_count
+    @{
+        site                    = $siteToLinkJson
+        status                  = $agent.status
+        description             = $agent.description
+        patches_pending         = $agent.has_patches_pending
+        last_seen               = $agent.last_seen
+        last_logged_username    = $agentDetailsResult.last_logged_in_user
+        needs_reboot            = $agent.needs_reboot
+        overdue_dashboard_alert = $agent.overdue_dashboard_alert
+        overdue_email_alert     = $agent.overdue_email_alert
+        overdue_text_alert      = $agent.overdue_text_alert
+        pending_actions_count   = $agent.pending_actions_count
         total_ram               = $agentDetailsResult.total_ram
         local_ips               = $agentDetailsResult.local_ips
         created_time            = $agentDetailsResult.created_time
@@ -296,24 +492,24 @@ foreach ($agents in $agentsResult) {
         public_ip               = $agentDetailsResult.public_ip
         disks                   = $textDisk
         cpu_model               = $textCpu
+        # Custom ones 
+        warranty_expiration     = $warrantyExp
+        serial_number           = $serial_number
+        custom_asset_tag        = $CustomAssetTag
+        # Agent ID - Used to match Tactical Agent ID with Hudu Agent ID
         agent_id                = $agentId
-	})
+    })
 
-    $huduCompaniesFiltered = Get-HuduCompanies -name $agents.client_name
+    $asset = Get-HuduAssets -assetlayoutid $huduAssetLayout.id -companyid $huduCompaniesFiltered.id | Where-Object { $_.fields | Where-Object { $_.label -eq "Agent Id" -and $_.value -eq $agentId } }
 
-    # If Hudu Company matches a Tactical Client
-    if ($huduCompaniesFiltered){
-        
-        $asset = Get-HuduAssets -name $agents.hostname -assetlayoutid $huduAssetLayout.id -companyid $huduCompaniesFiltered.id
-
-        $huduAgentId = Get-CustomFieldData -label "Agent Id" -arrayData $asset.fields
-
-        # If asset exist and the Hudu asset matches Tactical based on agent_id update.  Else create new asset
-        if ($asset -And $huduAgentId -eq $agentId){
-            Set-HuduAsset -name $agents.hostname -company_id $huduCompaniesFiltered.id -asset_layout_id $huduAssetLayout.id -fields $fieldData -asset_id $asset.id
-        } else {
-            Write-Host "Asset does not exist in Hudu.  Creating $agents.hostname"
-            New-HuduAsset -name $agents.hostname -company_id $huduCompaniesFiltered.id -asset_layout_id $huduAssetLayout.id -fields $fieldData
-        }
+    # If asset exist and the Hudu asset matches Tactical based on $agent_id_number update.  Else create new asset
+    if ($asset){
+        Write-Host "Updating Agent $agent_id_number for $($agent.hostname)" -ForegroundColor Green
+        Set-HuduAsset -name $agent.hostname -company_id $huduCompaniesFiltered.id -asset_layout_id $huduAssetLayout.id -fields $fieldData -asset_id $asset.id
+    } else {
+        Write-Host "Asset does not exist in Hudu.  Creating Agent $agent_id_number for $($agent.hostname)" -ForegroundColor Yellow
+        New-HuduAsset -name $agent.hostname -company_id $huduCompaniesFiltered.id -asset_layout_id $huduAssetLayout.id -fields $fieldData
     }
+
+    #pause;           # uncomment to pause after each agent
 }
