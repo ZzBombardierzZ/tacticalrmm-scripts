@@ -451,7 +451,7 @@ foreach ($agent in $agentsResult) {
         Write-Host "Site name $($agent.site_name) not found in Tactical site map." -ForegroundColor Red
     }
 
-    $siteToLinkJson = $siteToLinkArray | ConvertTo-Json
+    $siteToLinkJson = $siteToLinkArray | ConvertTo-Json -Compress -AsArray
     Write-Host "Site(s) found or created: $($siteToLinkJson)" -ForegroundColor Yellow
 
     try {
